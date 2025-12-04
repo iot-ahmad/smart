@@ -4,7 +4,7 @@ import openai
 import os
 from io import BytesIO
 
-app = Flask(_name_)
+app = Flask(__name__)
 CORS(app)
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -63,3 +63,4 @@ def tts():
 
 if _name_ == "_main_":
     app.run(host="0.0.0.0", port=10000)
+
