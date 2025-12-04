@@ -1,7 +1,7 @@
 import os
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-import openai
+from openai import OpenAI
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -10,8 +10,7 @@ if not OPENAI_API_KEY:
     print("ERROR: OPENAI_API_KEY not found in environment")
     raise SystemExit
 
-openai.api_key = OPENAI_API_KEY
-
+client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 
 @app.get("/")
@@ -26,13 +25,15 @@ def chat():
         return jsonify({"error": "no text provided"}), 400
 
     try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": user_text}],
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": user_text}
+            ],
+            max_tokens=200,
             temperature=0.7,
-            max_tokens=250,
         )
-        reply = resp["choices"][0]["message"]["content"]
+        reply = response.choices[0].message.content
         return jsonify({"reply": reply})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
