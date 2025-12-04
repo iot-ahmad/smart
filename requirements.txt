@@ -6,3 +6,5 @@ pyttsx3==2.90
 tqdm==4.67.1
 pydantic==2.12.5
 httpx==0.28.1
+SpeechRecognition==3.10.0
+
