@@ -1,5 +1,4 @@
 Flask
 flask-cors
-python-dotenv
 openai
-SpeechRecognition
+python-dotenv
