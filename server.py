@@ -98,7 +98,7 @@ def upload_audio():
 
     ai_text = response.output_text
 
-    # 🔊 تحويل النص لصوت
+    # 🔊 تحويل الرد إلى صوت
     tts_file = save_path.replace(".wav", "_reply.wav")
     with open(tts_file, "wb") as f:
         speech = client.audio.speech.create(
