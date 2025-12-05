@@ -4,10 +4,12 @@ FROM python:3.13-slim
 # تعيين متغير بيئة لمنفذ التشغيل
 ENV PORT 8080
 
-# تثبيت تبعيات النظام المطلوبة لـ pydub (FFmpeg)
-# FFmpeg ضروري لمعالجة الملفات الصوتية وتحويلها
+# تثبيت تبعيات النظام المطلوبة
+# - ffmpeg: لمعالجة الصوت (Pydub/gTTS)
+# - libasound-dev, portaudio19-dev: لدعم مكتبات الصوت
+# - python3-dev: لتوفير ملفات الرأس لوحدات Python المدمجة مثل audioop
 RUN apt-get update && \
-    apt-get install -y ffmpeg libasound-dev portaudio19-dev -y && \
+    apt-get install -y ffmpeg libasound-dev portaudio19-dev python3-dev -y && \
     rm -rf /var/lib/apt/lists/*
 
 # تعيين مجلد العمل داخل الحاوية
