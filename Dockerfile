@@ -7,7 +7,7 @@ ENV PORT 8080
 # تثبيت تبعيات النظام المطلوبة لـ pydub (FFmpeg)
 # FFmpeg ضروري لمعالجة الملفات الصوتية وتحويلها
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg libasound-dev portaudio19-dev -y && \
     rm -rf /var/lib/apt/lists/*
 
 # تعيين مجلد العمل داخل الحاوية
@@ -25,5 +25,5 @@ COPY . .
 # الإعلان عن المنفذ الذي سيعمل عليه التطبيق
 EXPOSE 8080
 
-# أمر بدء تشغيل التطبيق (تم التعديل لاستخدام server.py)
+# أمر بدء تشغيل التطبيق (باستخدام server.py)
 CMD ["python", "server.py"]
