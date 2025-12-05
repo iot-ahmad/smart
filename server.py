@@ -474,23 +474,23 @@ def upload_audio():
         
         # Step 1: Transcribe audio using Whisper
         logger.info("Starting Whisper transcription...")
-        audio_file.seek(0)
-        
+
         try:
-            audio_file = request.files['audio']
+            # audio_file تم تعريفه قبل فوق:
+            # audio_file = request.files['audio']
 
-# اقرأ البايتات من ملف Flask
-audio_bytes = audio_file.read()
+            # تأكد أن المؤشر في البداية
+            audio_file.seek(0)
 
-# (اختياري) ارجع للمؤشر إذا احتجته لاحقاً
-audio_file.seek(0)
+            # اقرأ البايتات من ملف Flask
+            audio_bytes = audio_file.read()
 
-transcript = client.audio.transcriptions.create(
-    model="whisper-1",  # أو gpt-4o-transcribe حسب ما تريد [web:10]
-    file=(audio_file.filename, audio_bytes, audio_file.mimetype),
-    language="ar"
-)
-user_text = transcript.text
+            # استدعاء Whisper مع tuple (اسم الملف، البايتات، نوع الميديا)
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",  # أو gpt-4o-transcribe إذا حاب
+                file=(audio_file.filename, audio_bytes, audio_file.mimetype),
+                language="ar"
+            )
 
             user_text = transcript.text
             esp32_data['text'] = user_text
@@ -502,25 +502,7 @@ user_text = transcript.text
                 'status': 'error',
                 'error': f'خطأ في تحويل الصوت: {str(e)}'
             }), 500
-        
-        # Step 2: Get ChatGPT response
-        logger.info("Getting ChatGPT response...")
-        try:
-            chat_response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "أنت مساعد صوتي ذكي ومفيد. أجب بشكل مختصر ومفيد باللغة العربية."
-                    },
-                    {
-                        "role": "user",
-                        "content": user_text
-                    }
-                ],
-                max_tokens=150,
-                temperature=0.7
-            )
+
             
             response_text = chat_response.choices[0].message.content
             esp32_data['response_text'] = response_text
@@ -664,4 +646,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"Starting server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
