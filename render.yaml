@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: smart-voice-assistant
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: OPENAI_API_KEY
+        sync: false
+    healthCheckPath: /status
+    autoDeploy: true
