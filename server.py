@@ -1,676 +1,224 @@
-"""
-Smart Voice Assistant Server
-Flask server with OpenAI Whisper, ChatGPT, and TTS integration
-"""
-
-import os
-import io
-import logging
-from flask import Flask, request, jsonify, send_file, render_template_string
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from openai import OpenAI
+import os
 from dotenv import load_dotenv
+from pydub import AudioSegment
+import io
+import requests
+from gtts import gTTS
+import threading
+import time
 
-# Load environment variables
+# تحميل متغيرات البيئة
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
-# Configure max upload size (10MB)
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
+# ==========================================
+# إعدادات OpenAI (النسخة الحديثة v1.0+)
+# ==========================================
+# تأكد من وجود OPENAI_API_KEY في ملف .env
+api_key = os.getenv('OPENAI_API_KEY')
+if not api_key:
+    print("⚠️ تحذير: لم يتم العثور على مفتاح OpenAI API")
 
-# Initialize OpenAI client
-try:
-    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-    logger.info("OpenAI client initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize OpenAI client: {str(e)}")
-    client = None
+client = OpenAI(api_key=api_key)
 
-# Global state for ESP32 communication
+# تخزين مؤقت للبيانات
 esp32_data = {
-    'status': 'ready',  # ready, processing, sending_to_esp32
-    'audio_data': None,
-    'has_audio': False,
-    'text': '',
-    'response_text': ''
+    'last_audio': None,
+    'status': 'ready'
 }
 
-# HTML page with embedded CSS and JavaScript
-HTML_PAGE = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مساعد صوتي ذكي - Smart Voice Assistant</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        
-        .container {
-            background: white;
-            border-radius: 20px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 600px;
-            width: 100%;
-            animation: fadeIn 0.5s ease-in;
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        h1 {
-            color: #667eea;
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 32px;
-            font-weight: bold;
-        }
-        
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 14px;
-        }
-        
-        .controls {
-            display: flex;
-            gap: 15px;
-            margin-bottom: 25px;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-        
-        button {
-            padding: 15px 30px;
-            border: none;
-            border-radius: 50px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            color: white;
-            font-family: inherit;
-        }
-        
-        #recordBtn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-        
-        #stopBtn {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            display: none;
-        }
-        
-        #clearBtn {
-            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
-        }
-        
-        button:hover:not(:disabled) {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-        }
-        
-        button:active:not(:disabled) {
-            transform: translateY(0);
-        }
-        
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        .status {
-            background: #f7f9fc;
-            padding: 20px;
-            border-radius: 15px;
-            margin-bottom: 20px;
-            min-height: 60px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border: 2px solid #e0e7ff;
-        }
-        
-        .status-text {
-            color: #555;
-            font-size: 16px;
-            text-align: center;
-        }
-        
-        .recording {
-            animation: pulse 1.5s ease-in-out infinite;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        
-        .result {
-            background: #e8f5e9;
-            padding: 20px;
-            border-radius: 15px;
-            margin-top: 20px;
-            display: none;
-            animation: slideIn 0.3s ease-out;
-        }
-        
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .result h3 {
-            color: #2e7d32;
-            margin-bottom: 10px;
-            font-size: 18px;
-        }
-        
-        .result p {
-            color: #333;
-            line-height: 1.6;
-            font-size: 15px;
-        }
-        
-        .loader {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        
-        .error {
-            background: #ffebee;
-            border: 2px solid #ef5350;
-        }
-        
-        .error .status-text {
-            color: #c62828;
-        }
-        
-        .success {
-            background: #e8f5e9;
-            border: 2px solid #66bb6a;
-        }
-        
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 2px solid #e0e7ff;
-            color: #666;
-            font-size: 12px;
-        }
-        
-        .footer a {
-            color: #667eea;
-            text-decoration: none;
-        }
-        
-        .footer a:hover {
-            text-decoration: underline;
-        }
-        
-        @media (max-width: 600px) {
-            .container {
-                padding: 20px;
-            }
-            
-            h1 {
-                font-size: 24px;
-            }
-            
-            button {
-                padding: 12px 20px;
-                font-size: 14px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🎤 مساعد صوتي ذكي</h1>
-        <p class="subtitle">مدعوم بـ OpenAI Whisper و ChatGPT</p>
-        
-        <div class="controls">
-            <button id="recordBtn">🎙️ ابدأ التسجيل</button>
-            <button id="stopBtn">⏹️ إيقاف التسجيل</button>
-            <button id="clearBtn">🗑️ مسح</button>
-        </div>
-        
-        <div class="status" id="statusBox">
-            <div class="status-text" id="statusText">اضغط على زر التسجيل للبدء</div>
-        </div>
-        
-        <div class="result" id="result">
-            <h3>📝 النص المحول:</h3>
-            <p id="transcriptText"></p>
-            <h3 style="margin-top: 15px;">🤖 رد المساعد:</h3>
-            <p id="responseText"></p>
-        </div>
-        
-        <div class="footer">
-            <p>🚀 مشروع مفتوح المصدر | Powered by OpenAI</p>
-        </div>
-    </div>
-
-    <script>
-        let mediaRecorder;
-        let audioChunks = [];
-        const recordBtn = document.getElementById('recordBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const clearBtn = document.getElementById('clearBtn');
-        const statusBox = document.getElementById('statusBox');
-        const statusText = document.getElementById('statusText');
-        const result = document.getElementById('result');
-        const transcriptText = document.getElementById('transcriptText');
-        const responseText = document.getElementById('responseText');
-
-        // Check browser support
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            statusText.innerHTML = '❌ المتصفح لا يدعم تسجيل الصوت';
-            statusBox.classList.add('error');
-            recordBtn.disabled = true;
-        }
-
-        recordBtn.addEventListener('click', async () => {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        sampleRate: 44100
-                    } 
-                });
-                
-                // Try to use the best available codec
-                const options = { mimeType: 'audio/webm' };
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options.mimeType = 'audio/ogg; codecs=opus';
-                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                        options.mimeType = 'audio/mp4';
-                    }
-                }
-                
-                mediaRecorder = new MediaRecorder(stream, options);
-                audioChunks = [];
-
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        audioChunks.push(event.data);
-                    }
-                };
-
-                mediaRecorder.onstop = async () => {
-                    const audioBlob = new Blob(audioChunks, { type: options.mimeType });
-                    await uploadAudio(audioBlob);
-                };
-
-                mediaRecorder.start();
-                recordBtn.style.display = 'none';
-                stopBtn.style.display = 'inline-block';
-                clearBtn.disabled = true;
-                statusText.innerHTML = '🔴 جاري التسجيل... تحدث الآن';
-                statusText.classList.add('recording');
-                statusBox.classList.remove('error', 'success');
-                result.style.display = 'none';
-            } catch (error) {
-                console.error('Error:', error);
-                statusText.innerHTML = '❌ خطأ في الوصول للميكروفون. تأكد من السماح بالوصول.';
-                statusBox.classList.add('error');
-            }
-        });
-
-        stopBtn.addEventListener('click', () => {
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.stop();
-                mediaRecorder.stream.getTracks().forEach(track => track.stop());
-            }
-            stopBtn.style.display = 'none';
-            recordBtn.style.display = 'inline-block';
-            statusText.classList.remove('recording');
-            statusBox.classList.remove('error', 'success');
-            statusText.innerHTML = '<div class="loader"></div>';
-        });
-
-        clearBtn.addEventListener('click', async () => {
-            try {
-                const response = await fetch('/clear', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
-
-                if (response.ok) {
-                    result.style.display = 'none';
-                    statusText.innerHTML = 'تم المسح بنجاح ✅';
-                    statusBox.classList.add('success');
-                    setTimeout(() => {
-                        statusText.innerHTML = 'اضغط على زر التسجيل للبدء';
-                        statusBox.classList.remove('success');
-                    }, 2000);
-                }
-            } catch (error) {
-                console.error('Clear error:', error);
-            }
-        });
-
-        async function uploadAudio(audioBlob) {
-            const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.webm');
-
-            try {
-                const response = await fetch('/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                const data = await response.json();
-
-                if (data.status === 'ok') {
-                    statusText.innerHTML = '✅ تم المعالجة بنجاح!';
-                    statusBox.classList.add('success');
-                    transcriptText.textContent = data.text;
-                    responseText.textContent = data.response;
-                    result.style.display = 'block';
-                    clearBtn.disabled = false;
-                } else {
-                    statusText.innerHTML = '❌ حدث خطأ: ' + (data.error || 'خطأ غير معروف');
-                    statusBox.classList.add('error');
-                    clearBtn.disabled = false;
-                }
-            } catch (error) {
-                console.error('Upload error:', error);
-                statusText.innerHTML = '❌ خطأ في الاتصال بالسيرفر. حاول مرة أخرى.';
-                statusBox.classList.add('error');
-                clearBtn.disabled = false;
-            }
-        }
-    </script>
-</body>
-</html>
-"""
-
-@app.route('/')
-def index():
-    """Serve the main HTML page"""
-    return render_template_string(HTML_PAGE)
-
-@app.route('/upload', methods=['POST'])
-def upload_audio():
-    """
-    Handle audio upload from web interface
-    Process: Audio -> Whisper (STT) -> ChatGPT -> TTS -> Store for ESP32
-    """
+# ========== وظيفة تحويل الصوت لنص (Whisper) ==========
+def convert_audio_to_text(audio_bytes):
+    """تحويل ملف صوتي لنص باستخدام OpenAI Whisper (أدق من Google)"""
     try:
-        # Check if OpenAI client is initialized
-        if client is None:
-            logger.error("OpenAI client not initialized")
-            return jsonify({
-                'status': 'error',
-                'error': 'OpenAI API key not configured'
-            }), 500
+        print("🎤 جاري تحويل الصوت إلى نص (Whisper)...")
+        
+        # 1. إعداد الملف في الذاكرة
+        # ملاحظة: يجب تحديد الاسم ليعرف OpenAI نوع الملف
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "input_audio.wav" 
 
-        # Check if audio file exists
+        # 2. الاستدعاء باستخدام واجهة OpenAI الحديثة
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1", 
+            file=audio_file
+        )
+        
+        text = transcript.text
+        print(f"✅ النص المستخرج: {text}")
+        return text
+    except Exception as e:
+        print(f"❌ خطأ في تحويل الصوت (Whisper): {e}")
+        # يمكنك هنا وضع بديل Google Speech Recognition إذا فشل Whisper
+        return None
+
+# ========== وظيفة استدعاء ChatGPT ==========
+def get_chatgpt_response(text):
+    """الحصول على رد من ChatGPT (النسخة الحديثة)"""
+    try:
+        print("🤖 جاري إرسال للـ ChatGPT...")
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "أنت مساعد ذكي ومختصر جداً. ردودك قصيرة ومناسبة للمحادثة الصوتية."},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=150,
+            temperature=0.7
+        )
+        
+        reply = response.choices[0].message.content
+        print(f"✅ رد ChatGPT: {reply}")
+        return reply
+    except Exception as e:
+        print(f"❌ خطأ في ChatGPT: {e}")
+        return None
+
+# ========== وظيفة تحويل النص لصوت ==========
+def convert_text_to_audio(text):
+    """تحويل نص لملف صوتي باستخدام gTTS"""
+    try:
+        print("🔊 جاري تحويل النص إلى صوت...")
+        
+        # استخدام gTTS (مجاني)
+        tts = gTTS(text=text, lang='ar', slow=False)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+        
+        # تحويل من MP3 إلى WAV (الـ ESP32 يفضل WAV عادة، أو يمكنك إرسال MP3 إذا كان يدعمه)
+        audio = AudioSegment.from_file(mp3_fp, format="mp3")
+        
+        # توحيد التردد (Sampling Rate) لضمان عمله على ESP32
+        # معظم مكتبات I2S في ESP32 تعمل جيداً مع 16000Hz أو 44100Hz
+        audio = audio.set_frame_rate(16000).set_channels(1)
+        
+        wav_stream = io.BytesIO()
+        audio.export(wav_stream, format="wav")
+        wav_stream.seek(0)
+        
+        return wav_stream
+    except Exception as e:
+        print(f"❌ خطأ في تحويل الصوت: {e}")
+        return None
+
+# ========== Endpoint الرئيسي ==========
+@app.route('/process-audio', methods=['POST'])
+def process_audio():
+    """استقبال الصوت من الويب ومعالجته"""
+    try:
+        print("\n" + "="*50)
+        print("📥 استقبال طلب صوتي جديد")
+        
         if 'audio' not in request.files:
-            logger.warning("No audio file in request")
-            return jsonify({
-                'status': 'error',
-                'error': 'لم يتم إرسال ملف صوتي'
-            }), 400
+            return jsonify({'error': 'لم يتم العثور على ملف صوتي'}), 400
         
-        audio_file = request.files['audio']
+        file = request.files['audio']
         
-        if audio_file.filename == '':
-            logger.warning("Empty audio filename")
-            return jsonify({
-                'status': 'error',
-                'error': 'اسم الملف فارغ'
-            }), 400
+        # قراءة البيانات الخام
+        raw_audio_data = file.read()
         
-        logger.info(f"Received audio file: {audio_file.filename}, size: {audio_file.content_length}")
-        
-        # Update status
-        esp32_data['status'] = 'processing'
-        
-        # Step 1: Transcribe audio using Whisper
-        logger.info("Starting Whisper transcription...")
-        audio_file.seek(0)
-        
+        # تحويل أي صيغة قادمة (webm, m4a, etc) إلى wav باستخدام Pydub
+        # هذا يحل مشاكل التنسيق القادمة من المتصفحات المختلفة
         try:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="ar"
-            )
-            user_text = transcript.text
-            esp32_data['text'] = user_text
-            logger.info(f"Transcription successful: {user_text[:50]}...")
+            input_audio = AudioSegment.from_file(io.BytesIO(raw_audio_data))
+            # تصدير إلى wav في الذاكرة لإرساله إلى Whisper
+            wav_buffer = io.BytesIO()
+            input_audio.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
+            final_audio_bytes = wav_buffer.read()
         except Exception as e:
-            logger.error(f"Whisper transcription error: {str(e)}")
-            esp32_data['status'] = 'ready'
-            return jsonify({
-                'status': 'error',
-                'error': f'خطأ في تحويل الصوت إلى نص: {str(e)}'
-            }), 500
-        
-        # Step 2: Get ChatGPT response
-        logger.info("Getting ChatGPT response...")
-        try:
-            chat_response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "أنت مساعد صوتي ذكي ومفيد. أجب بشكل مختصر ومفيد باللغة العربية."
-                    },
-                    {
-                        "role": "user",
-                        "content": user_text
-                    }
-                ],
-                max_tokens=150,
-                temperature=0.7
-            )
-            
-            response_text = chat_response.choices[0].message.content
-            esp32_data['response_text'] = response_text
-            logger.info(f"ChatGPT response: {response_text[:50]}...")
-        except Exception as e:
-            logger.error(f"ChatGPT error: {str(e)}")
-            esp32_data['status'] = 'ready'
-            return jsonify({
-                'status': 'error',
-                'error': f'خطأ في الحصول على الرد: {str(e)}'
-            }), 500
-        
-        # Step 3: Convert response to speech using TTS
-        logger.info("Converting text to speech...")
-        try:
-            tts_response = client.audio.speech.create(
-                model="tts-1",
-                voice="alloy",
-                input=response_text
-            )
-            
-            # Store audio data
-            audio_bytes = tts_response.content
-            esp32_data['audio_data'] = audio_bytes
-            esp32_data['has_audio'] = True
-            esp32_data['status'] = 'sending_to_esp32'
-            logger.info("TTS conversion successful")
-        except Exception as e:
-            logger.error(f"TTS error: {str(e)}")
-            esp32_data['status'] = 'ready'
-            return jsonify({
-                'status': 'error',
-                'error': f'خطأ في تحويل النص إلى صوت: {str(e)}'
-            }), 500
-        
-        logger.info("Audio processing completed successfully")
-        return jsonify({
-            'status': 'ok',
-            'text': user_text,
-            'response': response_text,
-            'audio_url': '/get-audio-stream'
-        })
-        
-    except Exception as e:
-        logger.error(f"Unexpected error in upload_audio: {str(e)}")
-        esp32_data['status'] = 'ready'
-        return jsonify({
-            'status': 'error',
-            'error': f'خطأ غير متوقع: {str(e)}'
-        }), 500
+            print(f"خطأ في معالجة ملف الصوت القادم: {e}")
+            return jsonify({'error': 'ملف صوتي تالف أو غير مدعوم'}), 400
 
-@app.route('/tts', methods=['POST'])
-def text_to_speech():
-    """
-    Convert text to speech
-    Request: {"text": "نص للتحويل"}
-    Response: MP3 audio file
-    """
-    try:
-        if client is None:
-            return jsonify({'error': 'OpenAI API key not configured'}), 500
-
-        data = request.get_json()
-        text = data.get('text', '')
-        
+        # 1️⃣ تحويل الصوت إلى نص
+        text = convert_audio_to_text(final_audio_bytes)
         if not text:
-            logger.warning("TTS: No text provided")
-            return jsonify({'error': 'لم يتم إرسال نص'}), 400
+            return jsonify({'error': 'فشل تحويل الصوت للنص'}), 500
         
-        logger.info(f"TTS request for text: {text[:50]}...")
+        # 2️⃣ إرسال النص إلى ChatGPT
+        response_text = get_chatgpt_response(text)
+        if not response_text:
+            return jsonify({'error': 'فشل في الحصول على رد'}), 500
         
-        # Generate speech
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice="alloy",
-            input=text
-        )
+        # 3️⃣ تحويل الرد للصوت
+        audio_stream = convert_text_to_audio(response_text)
+        if not audio_stream:
+            return jsonify({'error': 'فشل تحويل النص للصوت'}), 500
         
-        audio_bytes = response.content
-        logger.info("TTS generation successful")
+        # 4️⃣ حفظ الصوت للـ ESP32
+        audio_bytes = audio_stream.getvalue()
+        esp32_data['last_audio'] = audio_bytes
         
-        return send_file(
-            io.BytesIO(audio_bytes),
-            mimetype='audio/mpeg',
-            as_attachment=True,
-            download_name='speech.mp3'
-        )
+        # 5️⃣ إرسال الصوت للـ ESP32 (Thread)
+        esp32_data['status'] = 'sending_to_esp32'
+        threading.Thread(target=send_audio_to_esp32, args=(audio_bytes,)).start()
         
+        print("✅ اكتملت الدورة بنجاح")
+        print("="*50 + "\n")
+        
+        return jsonify({
+            'text': response_text,
+            'audio_url': '/get-audio-stream' # الرابط الذي يمكن للمتصفح تشغيله أيضاً
+        })
+    
     except Exception as e:
-        logger.error(f"TTS error: {str(e)}")
+        print(f"❌ خطأ غير متوقع: {e}")
         return jsonify({'error': str(e)}), 500
 
+# ========== إرسال الصوت للـ ESP32 ==========
+def send_audio_to_esp32(audio_data):
+    try:
+        # تأكد من وضع عنوان الـ IP الصحيح للـ ESP32 في ملف .env
+        # مثال: ESP32_IP=http://192.168.1.50
+        esp32_ip = os.getenv('ESP32_IP')
+        
+        if not esp32_ip:
+            print("⚠️ لم يتم تحديد ESP32_IP في ملف البيئة")
+            return
+
+        print(f"📡 إرسال {len(audio_data)} بايت إلى {esp32_ip}/audio ...")
+        
+        # إرسال البيانات كـ raw bytes
+        response = requests.post(
+            f"{esp32_ip}/audio",
+            data=audio_data,
+            headers={'Content-Type': 'audio/wav'}, # أو application/octet-stream حسب كود الـ ESP32
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            print("✅ استلم ESP32 الملف بنجاح")
+            esp32_data['status'] = 'playing'
+        else:
+            print(f"❌ رد غير متوقع من ESP32: {response.status_code}")
+            
+    except Exception as e:
+        print(f"❌ فشل الاتصال بـ ESP32: {e}")
+        esp32_data['status'] = 'error'
+
+# ========== Endpoint لتحميل الصوت (للمتصفح أو ESP32 polling) ==========
 @app.route('/get-audio-stream', methods=['GET'])
 def get_audio_stream():
-    """
-    Return the generated audio file for ESP32
-    """
-    try:
-        if not esp32_data['has_audio'] or esp32_data['audio_data'] is None:
-            logger.warning("Audio stream requested but no audio available")
-            return jsonify({'error': 'No audio available'}), 404
-        
-        audio_bytes = esp32_data['audio_data']
-        logger.info("Sending audio stream to ESP32")
-        
-        # Reset status after sending
-        esp32_data['status'] = 'ready'
-        
+    if esp32_data['last_audio']:
         return send_file(
-            io.BytesIO(audio_bytes),
-            mimetype='audio/mpeg',
-            as_attachment=False
+            io.BytesIO(esp32_data['last_audio']),
+            mimetype="audio/wav",
+            as_attachment=False,
+            download_name="response.wav"
         )
-        
-    except Exception as e:
-        logger.error(f"Error sending audio stream: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+    return "No audio", 404
 
-@app.route('/status', methods=['GET'])
-def get_status():
-    """
-    Return current system status for ESP32
-    """
-    status = {
-        'server': 'online',
-        'esp32_status': esp32_data['status'],
-        'has_audio': esp32_data['has_audio']
-    }
-    logger.debug(f"Status check: {status}")
-    return jsonify(status)
-
-@app.route('/clear', methods=['POST'])
-def clear_audio():
-    """
-    Clear the audio buffer and reset status
-    """
-    esp32_data['audio_data'] = None
-    esp32_data['has_audio'] = False
-    esp32_data['status'] = 'ready'
-    esp32_data['text'] = ''
-    esp32_data['response_text'] = ''
-    
-    logger.info("Audio buffer cleared")
-    return jsonify({'status': 'cleared'})
-
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    """Handle file too large error"""
-    return jsonify({
-        'error': 'الملف كبير جداً. الحد الأقصى 10MB'
-    }), 413
-
-@app.errorhandler(500)
-def internal_server_error(error):
-    """Handle internal server errors"""
-    logger.error(f"Internal server error: {str(error)}")
-    return jsonify({
-        'error': 'خطأ في السيرفر'
-    }), 500
+# ========== فحص الحالة ==========
+@app.route('/test', methods=['GET'])
+def test():
+    return jsonify({"status": "Server is running", "openai": "configured" if api_key else "missing"})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Starting server on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
