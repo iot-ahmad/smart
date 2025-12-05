@@ -5,10 +5,11 @@ import os
 from dotenv import load_dotenv
 from pydub import AudioSegment
 import io
-import requests
+# يجب استيراد gTTS لأن وظيفة convert_text_to_audio تعتمد عليها
 from gtts import gTTS
-import threading
-import time
+# تم إزالة import requests و import import threading 
+# لأن السيرفر لن يقوم بالاتصال بـ ESP32 (نموذج السحب/Pull)
+import time 
 
 # تحميل متغيرات البيئة
 load_dotenv()
@@ -24,22 +25,23 @@ api_key = os.getenv('OPENAI_API_KEY')
 if not api_key:
     print("⚠️ تحذير: لم يتم العثور على مفتاح OpenAI API")
 
+# تهيئة عميل OpenAI
 client = OpenAI(api_key=api_key)
 
 # تخزين مؤقت للبيانات
+# 'last_audio' هو الملف الصوتي الجاهز الذي ينتظر سحبه من قبل ESP32
 esp32_data = {
-    'last_audio': None,
+    'last_audio': None, 
     'status': 'ready'
 }
 
 # ========== وظيفة تحويل الصوت لنص (Whisper) ==========
 def convert_audio_to_text(audio_bytes):
-    """تحويل ملف صوتي لنص باستخدام OpenAI Whisper (أدق من Google)"""
+    """تحويل ملف صوتي لنص باستخدام OpenAI Whisper (محدث للتعامل مع ملفات الذاكرة)"""
     try:
         print("🎤 جاري تحويل الصوت إلى نص (Whisper)...")
         
-        # 1. إعداد الملف في الذاكرة
-        # ملاحظة: يجب تحديد الاسم ليعرف OpenAI نوع الملف
+        # 1. إعداد الملف في الذاكرة (مهم: تحديد الاسم لتجنب خطأ الملف)
         audio_file = io.BytesIO(audio_bytes)
         audio_file.name = "input_audio.wav" 
 
@@ -54,7 +56,6 @@ def convert_audio_to_text(audio_bytes):
         return text
     except Exception as e:
         print(f"❌ خطأ في تحويل الصوت (Whisper): {e}")
-        # يمكنك هنا وضع بديل Google Speech Recognition إذا فشل Whisper
         return None
 
 # ========== وظيفة استدعاء ChatGPT ==========
@@ -86,18 +87,16 @@ def convert_text_to_audio(text):
     try:
         print("🔊 جاري تحويل النص إلى صوت...")
         
-        # استخدام gTTS (مجاني)
+        # استخدام gTTS
         tts = gTTS(text=text, lang='ar', slow=False)
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
         mp3_fp.seek(0)
         
-        # تحويل من MP3 إلى WAV (الـ ESP32 يفضل WAV عادة، أو يمكنك إرسال MP3 إذا كان يدعمه)
+        # تحويل من MP3 إلى WAV وتوحيد التردد
         audio = AudioSegment.from_file(mp3_fp, format="mp3")
-        
-        # توحيد التردد (Sampling Rate) لضمان عمله على ESP32
-        # معظم مكتبات I2S في ESP32 تعمل جيداً مع 16000Hz أو 44100Hz
-        audio = audio.set_frame_rate(16000).set_channels(1)
+        # توحيد لـ 16kHz أحادي القناة لضمان عمله على ESP32
+        audio = audio.set_frame_rate(16000).set_channels(1) 
         
         wav_stream = io.BytesIO()
         audio.export(wav_stream, format="wav")
@@ -120,15 +119,11 @@ def process_audio():
             return jsonify({'error': 'لم يتم العثور على ملف صوتي'}), 400
         
         file = request.files['audio']
-        
-        # قراءة البيانات الخام
         raw_audio_data = file.read()
         
-        # تحويل أي صيغة قادمة (webm, m4a, etc) إلى wav باستخدام Pydub
-        # هذا يحل مشاكل التنسيق القادمة من المتصفحات المختلفة
+        # معالجة الملف الصوتي وتحويله إلى WAV (لضمان عمل Whisper)
         try:
             input_audio = AudioSegment.from_file(io.BytesIO(raw_audio_data))
-            # تصدير إلى wav في الذاكرة لإرساله إلى Whisper
             wav_buffer = io.BytesIO()
             input_audio.export(wav_buffer, format="wav")
             wav_buffer.seek(0)
@@ -155,60 +150,34 @@ def process_audio():
         # 4️⃣ حفظ الصوت للـ ESP32
         audio_bytes = audio_stream.getvalue()
         esp32_data['last_audio'] = audio_bytes
+        esp32_data['status'] = 'ready_for_pull'
         
-        # 5️⃣ إرسال الصوت للـ ESP32 (Thread)
-        esp32_data['status'] = 'sending_to_esp32'
-        threading.Thread(target=send_audio_to_esp32, args=(audio_bytes,)).start()
+        # لا يتم تنفيذ إرسال متزامن هنا
         
-        print("✅ اكتملت الدورة بنجاح")
+        print("✅ اكتملت المعالجة بنجاح. الصوت متاح للسحب بواسطة ESP32.")
         print("="*50 + "\n")
         
         return jsonify({
             'text': response_text,
-            'audio_url': '/get-audio-stream' # الرابط الذي يمكن للمتصفح تشغيله أيضاً
+            'audio_url': '/get-audio-stream' 
         })
     
     except Exception as e:
         print(f"❌ خطأ غير متوقع: {e}")
         return jsonify({'error': str(e)}), 500
 
-# ========== إرسال الصوت للـ ESP32 ==========
-def send_audio_to_esp32(audio_data):
-    try:
-        # تأكد من وضع عنوان الـ IP الصحيح للـ ESP32 في ملف .env
-        # مثال: ESP32_IP=http://192.168.1.50
-        esp32_ip = os.getenv('ESP32_IP')
-        
-        if not esp32_ip:
-            print("⚠️ لم يتم تحديد ESP32_IP في ملف البيئة")
-            return
-
-        print(f"📡 إرسال {len(audio_data)} بايت إلى {esp32_ip}/audio ...")
-        
-        # إرسال البيانات كـ raw bytes
-        response = requests.post(
-            f"{esp32_ip}/audio",
-            data=audio_data,
-            headers={'Content-Type': 'audio/wav'}, # أو application/octet-stream حسب كود الـ ESP32
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            print("✅ استلم ESP32 الملف بنجاح")
-            esp32_data['status'] = 'playing'
-        else:
-            print(f"❌ رد غير متوقع من ESP32: {response.status_code}")
-            
-    except Exception as e:
-        print(f"❌ فشل الاتصال بـ ESP32: {e}")
-        esp32_data['status'] = 'error'
-
-# ========== Endpoint لتحميل الصوت (للمتصفح أو ESP32 polling) ==========
+# ========== Endpoint لتحميل الصوت (الـ ESP32 سيقوم بعمل GET على هذا الرابط) ==========
 @app.route('/get-audio-stream', methods=['GET'])
 def get_audio_stream():
+    """إرسال الصوت الأخير للـ ESP32 أو المتصفح"""
     if esp32_data['last_audio']:
+        # إعادة تعيين الحالة بعد إرسال الملف مرة واحدة
+        # يمكن لـ ESP32 قراءة هذا الرابط وسحبه
+        audio_to_send = esp32_data['last_audio']
+        esp32_data['last_audio'] = None
+        esp32_data['status'] = 'ready' 
         return send_file(
-            io.BytesIO(esp32_data['last_audio']),
+            io.BytesIO(audio_to_send),
             mimetype="audio/wav",
             as_attachment=False,
             download_name="response.wav"
@@ -216,9 +185,21 @@ def get_audio_stream():
     return "No audio", 404
 
 # ========== فحص الحالة ==========
+@app.route('/status', methods=['GET'])
+def get_status():
+    """الحصول على حالة النظام"""
+    # يمكن لـ ESP32 استخدام هذا Endpoint لفحص ما إذا كان هناك صوت جديد جاهز (status = ready_for_pull)
+    return jsonify({
+        'server_status': 'online',
+        'audio_pull_status': esp32_data['status'],
+        'openai_configured': api_key is not None
+    })
+
+# ========== Endpoint للاختبار ==========
 @app.route('/test', methods=['GET'])
 def test():
     return jsonify({"status": "Server is running", "openai": "configured" if api_key else "missing"})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # الاستماع على جميع الواجهات في المنفذ 5000 (مطلوب للاستضافة على Render)
+    app.run(host='0.0.0.0', port=os.getenv('PORT', 5000), debug=True)
