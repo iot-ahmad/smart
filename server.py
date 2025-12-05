@@ -477,11 +477,21 @@ def upload_audio():
         audio_file.seek(0)
         
         try:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="ar"
-            )
+            audio_file = request.files['audio']
+
+# اقرأ البايتات من ملف Flask
+audio_bytes = audio_file.read()
+
+# (اختياري) ارجع للمؤشر إذا احتجته لاحقاً
+audio_file.seek(0)
+
+transcript = client.audio.transcriptions.create(
+    model="whisper-1",  # أو gpt-4o-transcribe حسب ما تريد [web:10]
+    file=(audio_file.filename, audio_bytes, audio_file.mimetype),
+    language="ar"
+)
+user_text = transcript.text
+
             user_text = transcript.text
             esp32_data['text'] = user_text
             logger.info(f"Transcription: {user_text[:50]}...")
@@ -654,3 +664,4 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"Starting server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
