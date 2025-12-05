@@ -1,6 +1,6 @@
 """
-Smart Voice Assistant Server
-Flask server with OpenAI Whisper, ChatGPT, and TTS integration
+Smart Voice Assistant Server - FREE VERSION
+Flask server with Groq (Whisper + Llama3) and Google TTS (gTTS) integration
 Fixed for Python 3.13 - No pydub dependency
 """
 
@@ -10,6 +10,7 @@ import logging
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 from openai import OpenAI
+from gtts import gTTS  # إضافة مكتبة الصوت المجانية
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -29,17 +30,23 @@ CORS(app)
 # Configure max upload size (10MB)
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 
-# Initialize OpenAI client
+# Initialize Groq client (using OpenAI library format)
 try:
-    api_key = os.getenv('OPENAI_API_KEY')
+    # استخدم مفتاح Groq هنا
+    api_key = os.getenv('GROQ_API_KEY') or os.getenv('OPENAI_API_KEY')
+    
     if not api_key:
-        logger.error("OPENAI_API_KEY not found in environment variables")
+        logger.error("GROQ_API_KEY not found in environment variables")
         client = None
     else:
-        client = OpenAI(api_key=api_key)
-        logger.info("OpenAI client initialized successfully")
+        # توجيه العميل لسيرفرات Groq المجانية
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1"
+        )
+        logger.info("Groq client initialized successfully")
 except Exception as e:
-    logger.error(f"Failed to initialize OpenAI client: {str(e)}")
+    logger.error(f"Failed to initialize Groq client: {str(e)}")
     client = None
 
 # Global state for ESP32 communication
@@ -273,7 +280,7 @@ HTML_PAGE = """
 <body>
     <div class="container">
         <h1>🎤 مساعد صوتي ذكي</h1>
-        <p class="subtitle">مدعوم بـ OpenAI Whisper و ChatGPT</p>
+        <p class="subtitle">مدعوم بـ Groq Whisper و Llama 3 (نسخة مجانية)</p>
         
         <div class="controls">
             <button id="recordBtn">🎙️ ابدأ التسجيل</button>
@@ -293,7 +300,7 @@ HTML_PAGE = """
         </div>
         
         <div class="footer">
-            <p>🚀 مشروع مفتوح المصدر | Powered by OpenAI</p>
+            <p>🚀 مشروع مفتوح المصدر | Powered by Groq & Google TTS</p>
         </div>
     </div>
 
@@ -442,14 +449,14 @@ def index():
 def upload_audio():
     """
     Handle audio upload from web interface
-    Process: Audio -> Whisper (STT) -> ChatGPT -> TTS -> Store for ESP32
+    Process: Audio -> Groq Whisper (STT) -> Groq Llama3 -> gTTS -> Store for ESP32
     """
     try:
         if client is None:
-            logger.error("OpenAI client not initialized")
+            logger.error("Groq client not initialized")
             return jsonify({
                 'status': 'error',
-                'error': 'OpenAI API key not configured'
+                'error': 'Groq API key not configured'
             }), 500
 
         if 'audio' not in request.files:
@@ -472,26 +479,17 @@ def upload_audio():
         
         esp32_data['status'] = 'processing'
         
-        # Step 1: Transcribe audio using Whisper
-        logger.info("Starting Whisper transcription...")
-
+        # Step 1: Transcribe audio using Groq Whisper (FREE)
+        logger.info("Starting Whisper transcription (Groq)...")
         try:
-            # audio_file تم تعريفه قبل فوق:
-            # audio_file = request.files['audio']
-
-            # تأكد أن المؤشر في البداية
             audio_file.seek(0)
-
-            # اقرأ البايتات من ملف Flask
             audio_bytes = audio_file.read()
-
-            # استدعاء Whisper مع tuple (اسم الملف، البايتات، نوع الميديا)
+            
             transcript = client.audio.transcriptions.create(
-                model="whisper-1",  # أو gpt-4o-transcribe إذا حاب
+                model="whisper-large-v3",  # موديل مجاني وسريع
                 file=(audio_file.filename, audio_bytes, audio_file.mimetype),
                 language="ar"
             )
-
             user_text = transcript.text
             esp32_data['text'] = user_text
             logger.info(f"Transcription: {user_text[:50]}...")
@@ -502,29 +500,48 @@ def upload_audio():
                 'status': 'error',
                 'error': f'خطأ في تحويل الصوت: {str(e)}'
             }), 500
-
+        
+        # Step 2: Get AI response using Groq Llama 3 (FREE)
+        logger.info("Getting AI response (Llama 3)...")
+        try:
+            chat_response = client.chat.completions.create(
+                model="llama3-8b-8192",  # موديل مجاني ذكي
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "أنت مساعد صوتي ذكي ومفيد. أجب بشكل مختصر ومفيد باللغة العربية."
+                    },
+                    {
+                        "role": "user",
+                        "content": user_text
+                    }
+                ],
+                max_tokens=150,
+                temperature=0.7
+            )
             
             response_text = chat_response.choices[0].message.content
             esp32_data['response_text'] = response_text
-            logger.info(f"ChatGPT response: {response_text[:50]}...")
+            logger.info(f"AI response: {response_text[:50]}...")
         except Exception as e:
-            logger.error(f"ChatGPT error: {str(e)}")
+            logger.error(f"AI error: {str(e)}")
             esp32_data['status'] = 'ready'
             return jsonify({
                 'status': 'error',
-                'error': f'خطأ في ChatGPT: {str(e)}'
+                'error': f'خطأ في الذكاء الاصطناعي: {str(e)}'
             }), 500
         
-        # Step 3: Convert to speech
-        logger.info("Converting to speech...")
+        # Step 3: Convert to speech using Google TTS (FREE)
+        logger.info("Converting to speech (gTTS)...")
         try:
-            tts_response = client.audio.speech.create(
-                model="tts-1",
-                voice="alloy",
-                input=response_text
-            )
+            tts = gTTS(text=response_text, lang='ar')
             
-            audio_bytes = tts_response.content
+            mp3_fp = io.BytesIO()
+            tts.write_to_fp(mp3_fp)
+            mp3_fp.seek(0)
+            
+            audio_bytes = mp3_fp.getvalue()
+            
             esp32_data['audio_data'] = audio_bytes
             esp32_data['has_audio'] = True
             esp32_data['status'] = 'sending_to_esp32'
@@ -555,11 +572,8 @@ def upload_audio():
 
 @app.route('/tts', methods=['POST'])
 def text_to_speech():
-    """Convert text to speech"""
+    """Convert text to speech using gTTS (FREE)"""
     try:
-        if client is None:
-            return jsonify({'error': 'OpenAI API not configured'}), 500
-
         data = request.get_json()
         text = data.get('text', '')
         
@@ -568,17 +582,15 @@ def text_to_speech():
         
         logger.info(f"TTS request: {text[:50]}...")
         
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice="alloy",
-            input=text
-        )
+        tts = gTTS(text=text, lang='ar')
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
         
-        audio_bytes = response.content
         logger.info("TTS generation successful")
         
         return send_file(
-            io.BytesIO(audio_bytes),
+            mp3_fp,
             mimetype='audio/mpeg',
             as_attachment=True,
             download_name='speech.mp3'
@@ -646,5 +658,3 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"Starting server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
-
-
